@@ -3,7 +3,6 @@ import 'dart:ui';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_tts/flutter_tts.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -70,16 +69,10 @@ class _TimerScreenState extends State<TimerScreen> {
   final TextEditingController customSecondsController =
       TextEditingController(text: '0');
 
-  final FlutterTts flutterTts = FlutterTts();
-  final AudioPlayer beepPlayer = AudioPlayer();
-
-  // Chromeでは短時間に複数回speakすると、前の数字が消えることがあるため、
-  // カウントダウンだけは必ず1つずつ順番に読み上げる。
-  Future<void> countdownSpeechQueue = Future<void>.value();
+  final AudioPlayer audioPlayer = AudioPlayer();
 
   bool isRunning = false;
   bool audioReady = false;
-  bool ttsReady = false;
 
   int remainingSeconds = 190;
   int currentShotRound = 1;
@@ -142,112 +135,45 @@ class _TimerScreenState extends State<TimerScreen> {
 
   Future<void> initializeAudio() async {
     try {
-      await flutterTts.setLanguage('ja-JP');
-      await flutterTts.setSpeechRate(1.0);
-      await flutterTts.setVolume(1.0);
-      await flutterTts.setPitch(1.05);
-
-      // スマホでは読み上げ完了を待つとタイマー進行が止まりやすいため、
-      // speak() の開始だけ行い、タイマーは端末の時計で進める。
-      await flutterTts.awaitSpeakCompletion(true);
-      await selectJapaneseFemaleVoiceIfAvailable();
-
-      // ビープ音は毎回プレイヤーを作らず、同じプレイヤーを使い回す。
-      await beepPlayer.setReleaseMode(ReleaseMode.stop);
-      await beepPlayer.setSource(AssetSource('sounds/beep.wav'));
+      await audioPlayer.setReleaseMode(ReleaseMode.stop);
 
       if (!mounted) return;
       setState(() {
         audioReady = true;
-        ttsReady = true;
       });
     } catch (error) {
       debugPrint('音声初期化エラー: $error');
       if (!mounted) return;
       setState(() {
         audioReady = true;
-        ttsReady = false;
       });
     }
   }
 
-  Future<void> selectJapaneseFemaleVoiceIfAvailable() async {
+  Future<void> playSound(
+    String fileName, {
+    Duration? waitAfterStart,
+  }) async {
     try {
-      final dynamic rawVoices = await flutterTts.getVoices;
-      if (rawVoices is! List) return;
+      await audioPlayer.stop();
+      await audioPlayer.play(
+        AssetSource('sounds/$fileName'),
+        mode: PlayerMode.lowLatency,
+      );
 
-      final voices = rawVoices
-          .whereType<Map>()
-          .map((voice) => Map<String, dynamic>.from(voice))
-          .toList();
-
-      final japaneseVoices = voices.where((voice) {
-        final locale =
-            (voice['locale'] ?? voice['language'] ?? '').toString().toLowerCase();
-        return locale.startsWith('ja');
-      }).toList();
-
-      if (japaneseVoices.isEmpty) return;
-
-      const femaleHints = <String>[
-        'female',
-        'woman',
-        'nanami',
-        'haruka',
-        'ayumi',
-        'kyoko',
-        'sakura',
-        '美',
-        '女',
-      ];
-
-      Map<String, dynamic> selected = japaneseVoices.first;
-
-      for (final voice in japaneseVoices) {
-        final combined =
-            '${voice['name'] ?? ''} ${voice['gender'] ?? ''}'.toLowerCase();
-        if (femaleHints.any(combined.contains)) {
-          selected = voice;
-          break;
-        }
-      }
-
-      final name = selected['name']?.toString();
-      final locale =
-          (selected['locale'] ?? selected['language'])?.toString();
-
-      if (name != null && locale != null) {
-        await flutterTts.setVoice(<String, String>{
-          'name': name,
-          'locale': locale,
-        });
+      if (waitAfterStart != null) {
+        await Future.delayed(waitAfterStart);
       }
     } catch (error) {
-      debugPrint('音声選択エラー: $error');
+      debugPrint('音声再生エラー ($fileName): $error');
     }
   }
 
   Future<void> playOneBeep() async {
-    try {
-      // iPhone Safariでは同じ音源を連続再生する前に先頭へ戻す必要がある。
-      await beepPlayer.stop();
-      await beepPlayer.seek(Duration.zero);
-      await beepPlayer.resume();
-
-      // 音声ファイルの再生完了は待たない。
-      // Safariの完了イベント待ちによる停止・遅延を防ぐ。
-      await Future.delayed(const Duration(milliseconds: 180));
-    } catch (error) {
-      debugPrint('ビープ音エラー: $error');
-
-      // resumeが失敗した端末向けの予備処理
-      try {
-        await beepPlayer.play(AssetSource('sounds/beep.wav'));
-        await Future.delayed(const Duration(milliseconds: 180));
-      } catch (fallbackError) {
-        debugPrint('ビープ音再試行エラー: $fallbackError');
-      }
-    }
+    await playSound(
+      'start.wav',
+      waitAfterStart: const Duration(milliseconds: 180),
+    );
   }
 
   Future<void> playBeeps(int count) async {
@@ -275,20 +201,14 @@ class _TimerScreenState extends State<TimerScreen> {
         });
       }
 
-     final stopwatch = Stopwatch()..start();
+      final stopwatch = Stopwatch()..start();
 
-try {
-  await flutterTts.stop();
-  await flutterTts.speak('$number');
-} catch (error) {
-  debugPrint('カウントダウン音声エラー: $error');
-}
+      await playSound('$number.wav');
 
-final waitTime = const Duration(seconds: 1) - stopwatch.elapsed;
-
-if (waitTime > Duration.zero) {
-  await Future.delayed(waitTime);
-}
+      final waitTime = const Duration(seconds: 1) - stopwatch.elapsed;
+      if (waitTime > Duration.zero) {
+        await Future.delayed(waitTime);
+      }
 
       if (!isCurrentRunActive(thisRunId)) return false;
     }
@@ -300,24 +220,6 @@ if (waitTime > Duration.zero) {
     }
 
     return true;
-  }
-
-  Future<void> speak(
-    String text, {
-    bool interruptCurrentSpeech = true,
-  }) async {
-    if (!ttsReady) return;
-
-    try {
-      // 通常アナウンスは前の音声を止める。
-      // 10秒カウントダウンは止めずに順番に読ませる。
-      if (interruptCurrentSpeech) {
-        await flutterTts.stop();
-      }
-      await flutterTts.speak(text);
-    } catch (error) {
-      debugPrint('音声読み上げエラー: $error');
-    }
   }
 
   bool isCurrentRunActive(int thisRunId) {
@@ -345,8 +247,6 @@ if (waitTime > Duration.zero) {
 
     runId++;
     final thisRunId = runId;
-
-    countdownSpeechQueue = Future<void>.value();
 
     setState(() {
       isRunning = true;
@@ -430,38 +330,36 @@ if (waitTime > Duration.zero) {
 
   void handleThreeMinuteAnnouncements() {
     if (remainingSeconds == 120) {
-      unawaited(speak('1分経過'));
+      unawaited(playSound('1min.wav'));
     } else if (remainingSeconds == 90) {
-      unawaited(speak('1分半経過'));
+      unawaited(playSound('1min30.wav'));
     } else if (remainingSeconds == 60) {
-      unawaited(speak('2分経過'));
+      unawaited(playSound('2min.wav'));
     } else if (remainingSeconds == 30) {
-      unawaited(speak('30秒前'));
+      unawaited(playSound('30sec.wav'));
     } else if (remainingSeconds == 15) {
-      unawaited(speak('15秒前'));
+      unawaited(playSound('15sec.wav'));
     }
   }
 
   void handleNinetySecondAnnouncements() {
     if (remainingSeconds == 60) {
-      unawaited(speak('1分前'));
+      unawaited(playSound('1min_left.wav'));
     } else if (remainingSeconds == 30) {
-      unawaited(speak('30秒前'));
+      unawaited(playSound('30sec.wav'));
     } else if (remainingSeconds == 15) {
-      unawaited(speak('15秒前'));
+      unawaited(playSound('15sec.wav'));
     }
   }
 
   void handleCustomAnnouncements() {
-    final elapsedSeconds = competitionSeconds - remainingSeconds;
-
     if (remainingSeconds == 30) {
-      unawaited(speak('30秒前'));
+      unawaited(playSound('30sec.wav'));
       return;
     }
 
     if (remainingSeconds == 15) {
-      unawaited(speak('15秒前'));
+      unawaited(playSound('15sec.wav'));
       return;
     }
 
@@ -470,12 +368,8 @@ if (waitTime > Duration.zero) {
       return;
     }
 
-    if (elapsedSeconds > 0 &&
-        elapsedSeconds % 60 == 0 &&
-        remainingSeconds > 30) {
-      final elapsedMinutes = elapsedSeconds ~/ 60;
-      unawaited(speak('$elapsedMinutes分経過'));
-    }
+    // カスタムモードの任意の「○分経過」は、対応音声ファイルがないため
+    // 画面表示のみで進行します。
   }
 
   Future<void> startThreeMinuteTwoRoundsMode(int thisRunId) async {
@@ -533,26 +427,22 @@ if (waitTime > Duration.zero) {
   }
 
   void scheduleStandingAnnouncement(int thisRunId, String standingGroup) {
-    Future.delayed(const Duration(seconds: 1), () {
-      if (isCurrentRunActive(thisRunId)) {
-        unawaited(speak('$standingGroup立ち'));
-      }
-    });
+    // AB立ち・CD立ちの音声ファイルは未使用です。画面表示のみ行います。
   }
 
   void handleTwoRoundsThreeMinuteAnnouncements() {
     if (remainingSeconds == 180) {
       unawaited(playOneBeep());
     } else if (remainingSeconds == 120) {
-      unawaited(speak('1分経過'));
+      unawaited(playSound('1min.wav'));
     } else if (remainingSeconds == 90) {
-      unawaited(speak('1分半経過'));
+      unawaited(playSound('1min30.wav'));
     } else if (remainingSeconds == 60) {
-      unawaited(speak('2分経過'));
+      unawaited(playSound('2min.wav'));
     } else if (remainingSeconds == 30) {
-      unawaited(speak('30秒前'));
+      unawaited(playSound('30sec.wav'));
     } else if (remainingSeconds == 15) {
-      unawaited(speak('15秒前'));
+      unawaited(playSound('15sec.wav'));
     }
   }
 
@@ -570,14 +460,14 @@ if (waitTime > Duration.zero) {
     await Future.delayed(const Duration(seconds: 1));
     if (!isCurrentRunActive(thisRunId)) return;
 
-    await speak('じゅうごびょうしゃ$currentShotRoundかいめ');
+    await playSound('shot$currentShotRound.wav');
     if (!isCurrentRunActive(thisRunId)) return;
 
     while (currentShotRound <= totalShotRounds) {
       if (!isCurrentRunActive(thisRunId)) return;
 
-      // 回数アナウンス後、約3秒待ってピーで射撃開始
-      await Future.delayed(const Duration(seconds: 3));
+      // 回数アナウンス後、約4秒待ってピーで射撃開始
+      await Future.delayed(const Duration(seconds: 4));
       if (!isCurrentRunActive(thisRunId)) return;
 
       setState(() {
@@ -630,15 +520,13 @@ if (waitTime > Duration.zero) {
       await Future.delayed(const Duration(seconds: 1));
       if (!isCurrentRunActive(thisRunId)) return;
 
-      await speak('じゅうごびょうしゃ$currentShotRoundかいめ');
+      await playSound('shot$currentShotRound.wav');
       if (!isCurrentRunActive(thisRunId)) return;
     }
   }
 
   void stopTimer() {
     runId++;
-    countdownSpeechQueue = Future<void>.value();
-    unawaited(flutterTts.stop());
 
     setState(() {
       isRunning = false;
@@ -647,8 +535,6 @@ if (waitTime > Duration.zero) {
 
   void resetTimer() {
     runId++;
-    countdownSpeechQueue = Future<void>.value();
-    unawaited(flutterTts.stop());
 
     setState(() {
       isRunning = false;
@@ -728,8 +614,7 @@ if (waitTime > Duration.zero) {
   @override
   void dispose() {
     runId++;
-    unawaited(flutterTts.stop());
-    unawaited(beepPlayer.dispose());
+    unawaited(audioPlayer.dispose());
     customMinutesController.dispose();
     customSecondsController.dispose();
     super.dispose();
@@ -929,25 +814,11 @@ if (waitTime > Duration.zero) {
                         style: OutlinedButton.styleFrom(
                           backgroundColor: Colors.white,
                         ),
-                        onPressed: ttsReady
-                            ? () => unawaited(speak('音声テストです'))
-                            : null,
-                        child: const Text('女性音声テスト'),
+                        onPressed: () => unawaited(playSound('1min.wav')),
+                        child: const Text('音声テスト'),
                       ),
                     ],
                   ),
-                  if (!ttsReady) ...[
-                    const SizedBox(height: 14),
-                    const Text(
-                      'この端末では日本語音声を初期化できませんでした。'
-                      'ビープ音とタイマーは使用できます。',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ],
                   const SizedBox(height: 18),
                   const Text(
                     'ブラウザの音量を上げ、最初に画面上のボタンを押して使用してください。',
