@@ -69,7 +69,10 @@ class _TimerScreenState extends State<TimerScreen> {
   final TextEditingController customSecondsController =
       TextEditingController(text: '0');
 
-  final AudioPlayer audioPlayer = AudioPlayer();
+  final Map<String, AudioPlayer> soundPlayers = <String, AudioPlayer>{};
+  final List<AudioPlayer> beepPlayers =
+      List<AudioPlayer>.generate(3, (_) => AudioPlayer());
+  int nextBeepPlayerIndex = 0;
 
   bool isRunning = false;
   bool audioReady = false;
@@ -133,9 +136,51 @@ class _TimerScreenState extends State<TimerScreen> {
     unawaited(initializeAudio());
   }
 
+  static const List<String> soundFiles = <String>[
+    '1min.wav',
+    '1min30.wav',
+    '2min.wav',
+    '1min_left.wav',
+    '30sec.wav',
+    '15sec.wav',
+    '10.wav',
+    '9.wav',
+    '8.wav',
+    '7.wav',
+    '6.wav',
+    '5.wav',
+    '4.wav',
+    '3.wav',
+    '2.wav',
+    '1.wav',
+    'shot1.wav',
+    'shot2.wav',
+    'shot3.wav',
+    'shot4.wav',
+    'shot5.wav',
+    'shot6.wav',
+    'shot7.wav',
+    'shot8.wav',
+    'shot9.wav',
+    'shot10.wav',
+  ];
+
   Future<void> initializeAudio() async {
     try {
-      await audioPlayer.setReleaseMode(ReleaseMode.stop);
+      // スマホでは1つのAudioPlayerで音源を切り替え続けると、
+      // 2回目以降の音声が再生されないことがあるため、音源ごとに分ける。
+      for (final fileName in soundFiles) {
+        final player = AudioPlayer();
+        await player.setReleaseMode(ReleaseMode.stop);
+        await player.setSource(AssetSource('sounds/$fileName'));
+        soundPlayers[fileName] = player;
+      }
+
+      // ピー・ピピ・ピピピは重ねて鳴らせるよう3台を用意する。
+      for (final player in beepPlayers) {
+        await player.setReleaseMode(ReleaseMode.stop);
+        await player.setSource(AssetSource('sounds/start.wav'));
+      }
 
       if (!mounted) return;
       setState(() {
@@ -155,25 +200,53 @@ class _TimerScreenState extends State<TimerScreen> {
     Duration? waitAfterStart,
   }) async {
     try {
-      await audioPlayer.stop();
-      await audioPlayer.play(
-        AssetSource('sounds/$fileName'),
-        mode: PlayerMode.lowLatency,
-      );
+      final player = soundPlayers[fileName] ?? AudioPlayer();
+
+      if (!soundPlayers.containsKey(fileName)) {
+        await player.setReleaseMode(ReleaseMode.stop);
+        await player.setSource(AssetSource('sounds/$fileName'));
+        soundPlayers[fileName] = player;
+      }
+
+      await player.stop();
+      await player.seek(Duration.zero);
+      await player.resume();
 
       if (waitAfterStart != null) {
         await Future.delayed(waitAfterStart);
       }
     } catch (error) {
       debugPrint('音声再生エラー ($fileName): $error');
+
+      // resumeが失敗した端末向けの予備処理
+      try {
+        final player = soundPlayers[fileName] ?? AudioPlayer();
+        soundPlayers[fileName] = player;
+        await player.play(AssetSource('sounds/$fileName'));
+        if (waitAfterStart != null) {
+          await Future.delayed(waitAfterStart);
+        }
+      } catch (fallbackError) {
+        debugPrint('音声再試行エラー ($fileName): $fallbackError');
+      }
     }
   }
 
   Future<void> playOneBeep() async {
-    await playSound(
-      'start.wav',
-      waitAfterStart: const Duration(milliseconds: 180),
-    );
+    try {
+      final player = beepPlayers[nextBeepPlayerIndex];
+      nextBeepPlayerIndex =
+          (nextBeepPlayerIndex + 1) % beepPlayers.length;
+
+      await player.stop();
+      await player.seek(Duration.zero);
+      await player.resume();
+
+      // start.wavを最後まで鳴らすため、次の処理まで少し待つ。
+      await Future.delayed(const Duration(milliseconds: 300));
+    } catch (error) {
+      debugPrint('ビープ音エラー: $error');
+    }
   }
 
   Future<void> playBeeps(int count) async {
@@ -614,7 +687,12 @@ class _TimerScreenState extends State<TimerScreen> {
   @override
   void dispose() {
     runId++;
-    unawaited(audioPlayer.dispose());
+    for (final player in soundPlayers.values) {
+      unawaited(player.dispose());
+    }
+    for (final player in beepPlayers) {
+      unawaited(player.dispose());
+    }
     customMinutesController.dispose();
     customSecondsController.dispose();
     super.dispose();
