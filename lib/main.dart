@@ -71,6 +71,7 @@ class _TimerScreenState extends State<TimerScreen> {
       TextEditingController(text: '0');
 
   final FlutterTts flutterTts = FlutterTts();
+  final AudioPlayer beepPlayer = AudioPlayer();
 
   // Chromeでは短時間に複数回speakすると、前の数字が消えることがあるため、
   // カウントダウンだけは必ず1つずつ順番に読み上げる。
@@ -145,8 +146,15 @@ class _TimerScreenState extends State<TimerScreen> {
       await flutterTts.setSpeechRate(1.0);
       await flutterTts.setVolume(1.0);
       await flutterTts.setPitch(1.05);
+
+      // スマホでは読み上げ完了を待つとタイマー進行が止まりやすいため、
+      // speak() の開始だけ行い、タイマーは端末の時計で進める。
       await flutterTts.awaitSpeakCompletion(true);
       await selectJapaneseFemaleVoiceIfAvailable();
+
+      // ビープ音は毎回プレイヤーを作らず、同じプレイヤーを使い回す。
+      await beepPlayer.setReleaseMode(ReleaseMode.stop);
+      await beepPlayer.setSource(AssetSource('sounds/beep.wav'));
 
       if (!mounted) return;
       setState(() {
@@ -221,25 +229,35 @@ class _TimerScreenState extends State<TimerScreen> {
 
   Future<void> playOneBeep() async {
     try {
-      final player = AudioPlayer();
-      await player.setReleaseMode(ReleaseMode.stop);
-      await player.play(AssetSource('sounds/beep.wav'));
-      await player.onPlayerComplete.first.timeout(
-        const Duration(seconds: 2),
-        onTimeout: () {},
-      );
-      await player.dispose();
+      // iPhone Safariでは同じ音源を連続再生する前に先頭へ戻す必要がある。
+      await beepPlayer.stop();
+      await beepPlayer.seek(Duration.zero);
+      await beepPlayer.resume();
+
+      // 音声ファイルの再生完了は待たない。
+      // Safariの完了イベント待ちによる停止・遅延を防ぐ。
+      await Future.delayed(const Duration(milliseconds: 180));
     } catch (error) {
       debugPrint('ビープ音エラー: $error');
+
+      // resumeが失敗した端末向けの予備処理
+      try {
+        await beepPlayer.play(AssetSource('sounds/beep.wav'));
+        await Future.delayed(const Duration(milliseconds: 180));
+      } catch (fallbackError) {
+        debugPrint('ビープ音再試行エラー: $fallbackError');
+      }
     }
   }
 
   Future<void> playBeeps(int count) async {
     for (int i = 0; i < count; i++) {
       await playOneBeep();
+
       if (i < count - 1) {
-        // 音と音の間を広げて、ピーピーピーが1音に聞こえないようにする
-        await Future.delayed(const Duration(milliseconds: 550));
+        // ビープの開始間隔を一定にする。
+        // playOneBeep内の180ms＋ここ420ms＝約600ms間隔。
+        await Future.delayed(const Duration(milliseconds: 420));
       }
     }
   }
@@ -257,20 +275,20 @@ class _TimerScreenState extends State<TimerScreen> {
         });
       }
 
-      final stopwatch = Stopwatch()..start();
+     final stopwatch = Stopwatch()..start();
 
-      try {
-        await flutterTts.stop();
-        await flutterTts.speak('$number');
-      } catch (error) {
-        debugPrint('カウントダウン音声エラー: $error');
-      }
+try {
+  await flutterTts.stop();
+  await flutterTts.speak('$number');
+} catch (error) {
+  debugPrint('カウントダウン音声エラー: $error');
+}
 
-      final remaining =
-          const Duration(seconds: 1) - stopwatch.elapsed;
-      if (remaining > Duration.zero) {
-        await Future.delayed(remaining);
-      }
+final waitTime = const Duration(seconds: 1) - stopwatch.elapsed;
+
+if (waitTime > Duration.zero) {
+  await Future.delayed(waitTime);
+}
 
       if (!isCurrentRunActive(thisRunId)) return false;
     }
@@ -354,7 +372,8 @@ class _TimerScreenState extends State<TimerScreen> {
   }
 
   Future<void> startNormalMode(int thisRunId) async {
-    unawaited(playBeeps(2));
+    await playBeeps(2);
+    if (!isCurrentRunActive(thisRunId)) return;
 
     while (remainingSeconds > 10) {
       if (!await waitOneSecond(thisRunId)) return;
@@ -465,7 +484,8 @@ class _TimerScreenState extends State<TimerScreen> {
       remainingSeconds = 190;
     });
 
-    unawaited(playBeeps(2));
+    await playBeeps(2);
+    if (!isCurrentRunActive(thisRunId)) return;
 
     while (currentThreeMinuteRound <= totalThreeMinuteRounds) {
       if (!isCurrentRunActive(thisRunId)) return;
@@ -491,7 +511,8 @@ class _TimerScreenState extends State<TimerScreen> {
       if (!isCurrentRunActive(thisRunId)) return;
 
       if (currentThreeMinuteRound == 1) {
-        unawaited(playBeeps(2));
+        await playBeeps(2);
+        if (!isCurrentRunActive(thisRunId)) return;
 
         setState(() {
           currentThreeMinuteRound = 2;
@@ -708,6 +729,7 @@ class _TimerScreenState extends State<TimerScreen> {
   void dispose() {
     runId++;
     unawaited(flutterTts.stop());
+    unawaited(beepPlayer.dispose());
     customMinutesController.dispose();
     customSecondsController.dispose();
     super.dispose();
