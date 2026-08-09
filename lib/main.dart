@@ -70,9 +70,11 @@ class _TimerScreenState extends State<TimerScreen> {
       TextEditingController(text: '0');
 
   final Map<String, AudioPlayer> soundPlayers = <String, AudioPlayer>{};
-  final List<AudioPlayer> beepPlayers =
-      List<AudioPlayer>.generate(3, (_) => AudioPlayer());
-  int nextBeepPlayerIndex = 0;
+
+  // スマホWeb対策：
+  // 準備音・競技開始音・終了音は、最初から最後まで
+  // 同じAudioPlayerを使い続ける。
+  final AudioPlayer beepPlayer = AudioPlayer();
 
   bool isRunning = false;
   bool audioReady = false;
@@ -176,11 +178,10 @@ class _TimerScreenState extends State<TimerScreen> {
         soundPlayers[fileName] = player;
       }
 
-      // ピー・ピピ・ピピピは重ねて鳴らせるよう3台を用意する。
-      for (final player in beepPlayers) {
-        await player.setReleaseMode(ReleaseMode.stop);
-        await player.setSource(AssetSource('sounds/start.wav'));
-      }
+      // 笛はスマホWebで後から無音になりにくいよう、
+      // 同じ1台のAudioPlayerを使い続ける。
+      await beepPlayer.setReleaseMode(ReleaseMode.stop);
+      await beepPlayer.setSource(AssetSource('sounds/start.wav'));
 
       if (!mounted) return;
       setState(() {
@@ -234,18 +235,35 @@ class _TimerScreenState extends State<TimerScreen> {
 
   Future<void> playOneBeep() async {
     try {
-      final player = beepPlayers[nextBeepPlayerIndex];
-      nextBeepPlayerIndex =
-          (nextBeepPlayerIndex + 1) % beepPlayers.length;
+      // スマホWebでは stop → seek → resume より、
+      // 同じプレイヤーで毎回 play() し直す方が安定しやすい。
+      await beepPlayer.stop();
+      await beepPlayer.play(
+        AssetSource('sounds/start.wav'),
+      );
 
-      await player.stop();
-      await player.seek(Duration.zero);
-      await player.resume();
-
-      // start.wavを最後まで鳴らすため、次の処理まで少し待つ。
-      await Future.delayed(const Duration(milliseconds: 300));
+      // 再生開始がブラウザ側に渡るまでだけ短く待つ。
+      await Future.delayed(
+        const Duration(milliseconds: 100),
+      );
     } catch (error) {
       debugPrint('ビープ音エラー: $error');
+
+      // 予備処理
+      try {
+        await beepPlayer.stop();
+        await beepPlayer.setSource(
+          AssetSource('sounds/start.wav'),
+        );
+        await beepPlayer.resume();
+        await Future.delayed(
+          const Duration(milliseconds: 100),
+        );
+      } catch (fallbackError) {
+        debugPrint(
+          'ビープ音再試行エラー: $fallbackError',
+        );
+      }
     }
   }
 
@@ -254,9 +272,9 @@ class _TimerScreenState extends State<TimerScreen> {
       await playOneBeep();
 
       if (i < count - 1) {
-        // ビープの開始間隔を一定にする。
-        // playOneBeep内の180ms＋ここ420ms＝約600ms間隔。
-        await Future.delayed(const Duration(milliseconds: 420));
+        await Future.delayed(
+          const Duration(milliseconds: 100),
+        );
       }
     }
   }
@@ -355,7 +373,14 @@ class _TimerScreenState extends State<TimerScreen> {
         remainingSeconds--;
       });
 
-      handleNormalModeAnnouncements();
+      // 準備10秒が終わった瞬間の競技開始ピー。
+      // スマホWebでも確実に再生開始させるため await する。
+      if (remainingSeconds == competitionSeconds) {
+        await playOneBeep();
+        if (!isCurrentRunActive(thisRunId)) return;
+      } else {
+        handleNormalModeAnnouncements();
+      }
     }
 
     if (!isCurrentRunActive(thisRunId)) return;
@@ -379,11 +404,6 @@ class _TimerScreenState extends State<TimerScreen> {
   }
 
   void handleNormalModeAnnouncements() {
-    if (remainingSeconds == competitionSeconds) {
-      unawaited(playOneBeep());
-      return;
-    }
-
     switch (selectedMode) {
       case TimerMode.threeMinutes:
         handleThreeMinuteAnnouncements();
@@ -466,7 +486,12 @@ class _TimerScreenState extends State<TimerScreen> {
           remainingSeconds--;
         });
 
-        handleTwoRoundsThreeMinuteAnnouncements();
+        if (remainingSeconds == 180) {
+          await playOneBeep();
+          if (!isCurrentRunActive(thisRunId)) return;
+        } else {
+          handleTwoRoundsThreeMinuteAnnouncements();
+        }
       }
 
       if (!isCurrentRunActive(thisRunId)) return;
@@ -504,9 +529,7 @@ class _TimerScreenState extends State<TimerScreen> {
   }
 
   void handleTwoRoundsThreeMinuteAnnouncements() {
-    if (remainingSeconds == 180) {
-      unawaited(playOneBeep());
-    } else if (remainingSeconds == 120) {
+    if (remainingSeconds == 120) {
       unawaited(playSound('1min.wav'));
     } else if (remainingSeconds == 90) {
       unawaited(playSound('1min30.wav'));
@@ -690,9 +713,7 @@ class _TimerScreenState extends State<TimerScreen> {
     for (final player in soundPlayers.values) {
       unawaited(player.dispose());
     }
-    for (final player in beepPlayers) {
-      unawaited(player.dispose());
-    }
+    unawaited(beepPlayer.dispose());
     customMinutesController.dispose();
     customSecondsController.dispose();
     super.dispose();
