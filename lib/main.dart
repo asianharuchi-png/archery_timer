@@ -69,9 +69,13 @@ class _TimerScreenState extends State<TimerScreen> {
   final TextEditingController customSecondsController =
       TextEditingController(text: '0');
 
-  // スマホWeb対策：
-  // 笛・案内音声・カウントダウンをすべて同じAudioPlayerで再生する。
-  final AudioPlayer audioPlayer = AudioPlayer();
+  // スマホWeb向け：
+  // 音声を事前読み込みしたAudioPoolで再生する。
+  final Map<String, AudioPool> soundPools = <String, AudioPool>{};
+  AudioPool? beepPool;
+
+  // 案内・カウントダウンの前の音声を切るために保持。
+  StopFunction? currentVoiceStop;
 
   bool isRunning = false;
   bool audioReady = false;
@@ -166,10 +170,30 @@ class _TimerScreenState extends State<TimerScreen> {
 
   Future<void> initializeAudio() async {
     try {
-      await audioPlayer.setReleaseMode(ReleaseMode.stop);
-      await audioPlayer.setSource(
-        AssetSource('sounds/start.wav'),
+      // WebではAudioCacheがURLを先に取得してブラウザキャッシュへ入れる。
+      await AudioCache.instance.loadAll(
+        <String>[
+          'sounds/start.wav',
+          ...soundFiles.map((file) => 'sounds/$file'),
+        ],
       );
+
+      // 笛はピーピー・ピーピーピーを重ねられるよう3台。
+      beepPool = await AudioPool.createFromAsset(
+        path: 'sounds/start.wav',
+        minPlayers: 3,
+        maxPlayers: 3,
+      );
+
+      // 各案内音声も事前読み込み。
+      // maxPlayers=1で同じ音声が暴発しないようにする。
+      for (final fileName in soundFiles) {
+        soundPools[fileName] = await AudioPool.createFromAsset(
+          path: 'sounds/$fileName',
+          minPlayers: 1,
+          maxPlayers: 1,
+        );
+      }
 
       if (!mounted) return;
       setState(() {
@@ -177,6 +201,7 @@ class _TimerScreenState extends State<TimerScreen> {
       });
     } catch (error) {
       debugPrint('音声初期化エラー: $error');
+
       if (!mounted) return;
       setState(() {
         audioReady = true;
@@ -189,65 +214,52 @@ class _TimerScreenState extends State<TimerScreen> {
     Duration? waitAfterStart,
   }) async {
     try {
-      // すべて同じAudioPlayerで再生する。
-      // 前の音の余韻は切って、その秒から次の音声を再生。
-      await audioPlayer.stop();
-      await audioPlayer.play(
-        AssetSource('sounds/$fileName'),
-      );
+      // 前の案内・数字の余韻を切る。
+      final previousStop = currentVoiceStop;
+      currentVoiceStop = null;
+
+      if (previousStop != null) {
+        try {
+          await previousStop();
+        } catch (_) {}
+      }
+
+      final pool = soundPools[fileName];
+
+      if (pool == null) {
+        debugPrint('AudioPoolがありません: $fileName');
+        return;
+      }
+
+      // 事前読み込み済みの音声を即再生。
+      currentVoiceStop = await pool.start();
 
       if (waitAfterStart != null) {
         await Future.delayed(waitAfterStart);
       }
     } catch (error) {
       debugPrint('音声再生エラー ($fileName): $error');
-
-      try {
-        await audioPlayer.stop();
-        await audioPlayer.setSource(
-          AssetSource('sounds/$fileName'),
-        );
-        await audioPlayer.resume();
-
-        if (waitAfterStart != null) {
-          await Future.delayed(waitAfterStart);
-        }
-      } catch (fallbackError) {
-        debugPrint(
-          '音声再試行エラー ($fileName): $fallbackError',
-        );
-      }
     }
   }
 
   Future<void> playOneBeep() async {
     try {
-      await audioPlayer.stop();
-      await audioPlayer.play(
-        AssetSource('sounds/start.wav'),
-      );
+      final pool = beepPool;
 
+      if (pool == null) {
+        debugPrint('beepPoolが未初期化です');
+        return;
+      }
+
+      // AudioPoolなので前のピーを止めずに次のピーを鳴らせる。
+      await pool.start();
+
+      // 「再生開始」だけ少し待つ。
       await Future.delayed(
-        const Duration(milliseconds: 100),
+        const Duration(milliseconds: 40),
       );
     } catch (error) {
       debugPrint('ビープ音エラー: $error');
-
-      try {
-        await audioPlayer.stop();
-        await audioPlayer.setSource(
-          AssetSource('sounds/start.wav'),
-        );
-        await audioPlayer.resume();
-
-        await Future.delayed(
-          const Duration(milliseconds: 100),
-        );
-      } catch (fallbackError) {
-        debugPrint(
-          'ビープ音再試行エラー: $fallbackError',
-        );
-      }
     }
   }
 
@@ -256,8 +268,9 @@ class _TimerScreenState extends State<TimerScreen> {
       await playOneBeep();
 
       if (i < count - 1) {
+        // ピーの開始間隔。AudioPoolなので前の音を消さない。
         await Future.delayed(
-          const Duration(milliseconds: 100),
+          const Duration(milliseconds: 120),
         );
       }
     }
@@ -357,6 +370,7 @@ class _TimerScreenState extends State<TimerScreen> {
         remainingSeconds--;
       });
 
+      // 準備10秒が終わった瞬間の競技開始ピー。
       if (remainingSeconds == competitionSeconds) {
         await playOneBeep();
         if (!isCurrentRunActive(thisRunId)) return;
@@ -606,6 +620,12 @@ class _TimerScreenState extends State<TimerScreen> {
   void stopTimer() {
     runId++;
 
+    final stop = currentVoiceStop;
+    currentVoiceStop = null;
+    if (stop != null) {
+      unawaited(stop());
+    }
+
     setState(() {
       isRunning = false;
     });
@@ -613,6 +633,12 @@ class _TimerScreenState extends State<TimerScreen> {
 
   void resetTimer() {
     runId++;
+
+    final stop = currentVoiceStop;
+    currentVoiceStop = null;
+    if (stop != null) {
+      unawaited(stop());
+    }
 
     setState(() {
       isRunning = false;
@@ -692,7 +718,20 @@ class _TimerScreenState extends State<TimerScreen> {
   @override
   void dispose() {
     runId++;
-    unawaited(audioPlayer.dispose());
+    final stop = currentVoiceStop;
+    currentVoiceStop = null;
+    if (stop != null) {
+      unawaited(stop());
+    }
+
+    for (final pool in soundPools.values) {
+      unawaited(pool.dispose());
+    }
+
+    final beep = beepPool;
+    if (beep != null) {
+      unawaited(beep.dispose());
+    }
     customMinutesController.dispose();
     customSecondsController.dispose();
     super.dispose();
