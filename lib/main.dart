@@ -69,12 +69,9 @@ class _TimerScreenState extends State<TimerScreen> {
   final TextEditingController customSecondsController =
       TextEditingController(text: '0');
 
-  final Map<String, AudioPlayer> soundPlayers = <String, AudioPlayer>{};
-
   // スマホWeb対策：
-  // 準備音・競技開始音・終了音は、最初から最後まで
-  // 同じAudioPlayerを使い続ける。
-  final AudioPlayer beepPlayer = AudioPlayer();
+  // 笛・案内音声・カウントダウンをすべて同じAudioPlayerで再生する。
+  final AudioPlayer audioPlayer = AudioPlayer();
 
   bool isRunning = false;
   bool audioReady = false;
@@ -169,19 +166,10 @@ class _TimerScreenState extends State<TimerScreen> {
 
   Future<void> initializeAudio() async {
     try {
-      // スマホでは1つのAudioPlayerで音源を切り替え続けると、
-      // 2回目以降の音声が再生されないことがあるため、音源ごとに分ける。
-      for (final fileName in soundFiles) {
-        final player = AudioPlayer();
-        await player.setReleaseMode(ReleaseMode.stop);
-        await player.setSource(AssetSource('sounds/$fileName'));
-        soundPlayers[fileName] = player;
-      }
-
-      // 笛はスマホWebで後から無音になりにくいよう、
-      // 同じ1台のAudioPlayerを使い続ける。
-      await beepPlayer.setReleaseMode(ReleaseMode.stop);
-      await beepPlayer.setSource(AssetSource('sounds/start.wav'));
+      await audioPlayer.setReleaseMode(ReleaseMode.stop);
+      await audioPlayer.setSource(
+        AssetSource('sounds/start.wav'),
+      );
 
       if (!mounted) return;
       setState(() {
@@ -201,17 +189,12 @@ class _TimerScreenState extends State<TimerScreen> {
     Duration? waitAfterStart,
   }) async {
     try {
-      final player = soundPlayers[fileName] ?? AudioPlayer();
-
-      if (!soundPlayers.containsKey(fileName)) {
-        await player.setReleaseMode(ReleaseMode.stop);
-        await player.setSource(AssetSource('sounds/$fileName'));
-        soundPlayers[fileName] = player;
-      }
-
-      await player.stop();
-      await player.seek(Duration.zero);
-      await player.resume();
+      // すべて同じAudioPlayerで再生する。
+      // 前の音の余韻は切って、その秒から次の音声を再生。
+      await audioPlayer.stop();
+      await audioPlayer.play(
+        AssetSource('sounds/$fileName'),
+      );
 
       if (waitAfterStart != null) {
         await Future.delayed(waitAfterStart);
@@ -219,43 +202,44 @@ class _TimerScreenState extends State<TimerScreen> {
     } catch (error) {
       debugPrint('音声再生エラー ($fileName): $error');
 
-      // resumeが失敗した端末向けの予備処理
       try {
-        final player = soundPlayers[fileName] ?? AudioPlayer();
-        soundPlayers[fileName] = player;
-        await player.play(AssetSource('sounds/$fileName'));
+        await audioPlayer.stop();
+        await audioPlayer.setSource(
+          AssetSource('sounds/$fileName'),
+        );
+        await audioPlayer.resume();
+
         if (waitAfterStart != null) {
           await Future.delayed(waitAfterStart);
         }
       } catch (fallbackError) {
-        debugPrint('音声再試行エラー ($fileName): $fallbackError');
+        debugPrint(
+          '音声再試行エラー ($fileName): $fallbackError',
+        );
       }
     }
   }
 
   Future<void> playOneBeep() async {
     try {
-      // スマホWebでは stop → seek → resume より、
-      // 同じプレイヤーで毎回 play() し直す方が安定しやすい。
-      await beepPlayer.stop();
-      await beepPlayer.play(
+      await audioPlayer.stop();
+      await audioPlayer.play(
         AssetSource('sounds/start.wav'),
       );
 
-      // 再生開始がブラウザ側に渡るまでだけ短く待つ。
       await Future.delayed(
         const Duration(milliseconds: 100),
       );
     } catch (error) {
       debugPrint('ビープ音エラー: $error');
 
-      // 予備処理
       try {
-        await beepPlayer.stop();
-        await beepPlayer.setSource(
+        await audioPlayer.stop();
+        await audioPlayer.setSource(
           AssetSource('sounds/start.wav'),
         );
-        await beepPlayer.resume();
+        await audioPlayer.resume();
+
         await Future.delayed(
           const Duration(milliseconds: 100),
         );
@@ -373,8 +357,6 @@ class _TimerScreenState extends State<TimerScreen> {
         remainingSeconds--;
       });
 
-      // 準備10秒が終わった瞬間の競技開始ピー。
-      // スマホWebでも確実に再生開始させるため await する。
       if (remainingSeconds == competitionSeconds) {
         await playOneBeep();
         if (!isCurrentRunActive(thisRunId)) return;
@@ -710,10 +692,7 @@ class _TimerScreenState extends State<TimerScreen> {
   @override
   void dispose() {
     runId++;
-    for (final player in soundPlayers.values) {
-      unawaited(player.dispose());
-    }
-    unawaited(beepPlayer.dispose());
+    unawaited(audioPlayer.dispose());
     customMinutesController.dispose();
     customSecondsController.dispose();
     super.dispose();
