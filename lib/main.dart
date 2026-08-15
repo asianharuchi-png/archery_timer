@@ -270,7 +270,7 @@ class _TimerScreenState extends State<TimerScreen> {
       if (i < count - 1) {
         // ピーの開始間隔。AudioPoolなので前の音を消さない。
         await Future.delayed(
-          const Duration(milliseconds: 120),
+          const Duration(milliseconds: 650),
         );
       }
     }
@@ -544,11 +544,16 @@ class _TimerScreenState extends State<TimerScreen> {
       remainingSeconds = shotSeconds;
     });
 
-    // 1回目の準備開始合図
+    // 15秒射の流れ：
+    // ピーピー → 1回目 → 15秒射開始 → カウントダウン
+    // → ピーピー → 2回目 → 15秒射開始 → カウントダウン …
+    // → 最後はピーピーピー
+
+    // 最初の準備開始
     await playBeeps(2);
     if (!isCurrentRunActive(thisRunId)) return;
 
-    // ピピの1秒後に回数を読み上げる
+    // 1回目
     await Future.delayed(const Duration(seconds: 1));
     if (!isCurrentRunActive(thisRunId)) return;
 
@@ -558,7 +563,7 @@ class _TimerScreenState extends State<TimerScreen> {
     while (currentShotRound <= totalShotRounds) {
       if (!isCurrentRunActive(thisRunId)) return;
 
-      // 回数アナウンス後、約4秒待ってピーで射撃開始
+      // 回数アナウンス後、約4秒待って15秒射開始のピー
       await Future.delayed(const Duration(seconds: 4));
       if (!isCurrentRunActive(thisRunId)) return;
 
@@ -569,7 +574,7 @@ class _TimerScreenState extends State<TimerScreen> {
       await playOneBeep();
       if (!isCurrentRunActive(thisRunId)) return;
 
-      // 15秒から11秒までは通常の秒送り
+      // 15秒から11秒まで
       while (remainingSeconds > 10) {
         if (!await waitOneSecond(thisRunId)) return;
         setState(() {
@@ -577,15 +582,15 @@ class _TimerScreenState extends State<TimerScreen> {
         });
       }
 
-      // 10、9、8……1を表示と音声で同期
+      // 10、9、8……1
       final completed = await runSynchronizedCountdown(
         thisRunId,
         from: remainingSeconds.clamp(1, 10),
       );
       if (!completed) return;
 
+      // 10回目終了
       if (currentShotRound == totalShotRounds) {
-        // 10回目だけ競技終了のピーピーピー
         await Future.delayed(const Duration(seconds: 1));
         if (!isCurrentRunActive(thisRunId)) return;
 
@@ -598,17 +603,17 @@ class _TimerScreenState extends State<TimerScreen> {
         return;
       }
 
-      // 次の回数へ進める
+      // 15秒射終了 → ピーピー
+      await playBeeps(2);
+      if (!isCurrentRunActive(thisRunId)) return;
+
+      // 次の回数へ
       setState(() {
         currentShotRound++;
         remainingSeconds = shotSeconds;
       });
 
-      // 各回終了直後のピピが、そのまま次の回の準備開始合図
-      await playBeeps(2);
-      if (!isCurrentRunActive(thisRunId)) return;
-
-      // ピピの1秒後に「15秒しゃ2回目」などと読み上げる
+      // ピーピーの1秒後に次の回数
       await Future.delayed(const Duration(seconds: 1));
       if (!isCurrentRunActive(thisRunId)) return;
 
