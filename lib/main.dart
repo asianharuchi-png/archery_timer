@@ -243,23 +243,23 @@ class _TimerScreenState extends State<TimerScreen> {
   }
 
   Future<void> playOneBeep() async {
+    final pool = beepPool;
+
+    if (pool == null) {
+      debugPrint('beepPoolが未初期化です');
+      return;
+    }
+
     try {
-      final pool = beepPool;
-
-      if (pool == null) {
-        debugPrint('beepPoolが未初期化です');
-        return;
-      }
-
-      // AudioPoolなので前のピーを止めずに次のピーを鳴らせる。
-      await pool.start();
-
-      // 「再生開始」だけ少し待つ。
-      await Future.delayed(
-        const Duration(milliseconds: 40),
+      // スマホWebでstart()の完了を待たない。
+      // 再生要求だけをブラウザへ渡し、タイマーをブロックしない。
+      unawaited(
+        pool.start().catchError((error) {
+          debugPrint('ビープ音エラー: $error');
+        }),
       );
     } catch (error) {
-      debugPrint('ビープ音エラー: $error');
+      debugPrint('ビープ音開始エラー: $error');
     }
   }
 
@@ -270,7 +270,7 @@ class _TimerScreenState extends State<TimerScreen> {
       if (i < count - 1) {
         // ピーの開始間隔。AudioPoolなので前の音を消さない。
         await Future.delayed(
-          const Duration(milliseconds: 650),
+          const Duration(milliseconds: 120),
         );
       }
     }
@@ -366,15 +366,28 @@ class _TimerScreenState extends State<TimerScreen> {
     while (remainingSeconds > 10) {
       if (!await waitOneSecond(thisRunId)) return;
 
-      setState(() {
-        remainingSeconds--;
-      });
+      // 準備時間の最後。
+      // スマホWebではAudioPool.start()をawaitすると、
+      // 音声側の処理待ちでタイマー自体が止まることがある。
+      // そこで競技開始ピーを再生開始させてから、タイマーを進める。
+      if (remainingSeconds == competitionSeconds + 1) {
+        unawaited(playOneBeep());
 
-      // 準備10秒が終わった瞬間の競技開始ピー。
-      if (remainingSeconds == competitionSeconds) {
-        await playOneBeep();
+        // ブラウザに再生開始を渡すためのごく短い待ち時間。
+        await Future.delayed(
+          const Duration(milliseconds: 80),
+        );
+
         if (!isCurrentRunActive(thisRunId)) return;
+
+        setState(() {
+          remainingSeconds--;
+        });
       } else {
+        setState(() {
+          remainingSeconds--;
+        });
+
         handleNormalModeAnnouncements();
       }
     }
@@ -478,14 +491,26 @@ class _TimerScreenState extends State<TimerScreen> {
       while (remainingSeconds > 1) {
         if (!await waitOneSecond(thisRunId)) return;
 
-        setState(() {
-          remainingSeconds--;
-        });
+        // 3:00の競技開始。
+        // 音声のFutureを待たず、再生開始をスケジュールしてから
+        // タイマーを3:00へ進める。
+        if (remainingSeconds == 181) {
+          unawaited(playOneBeep());
 
-        if (remainingSeconds == 180) {
-          await playOneBeep();
+          await Future.delayed(
+            const Duration(milliseconds: 80),
+          );
+
           if (!isCurrentRunActive(thisRunId)) return;
+
+          setState(() {
+            remainingSeconds--;
+          });
         } else {
+          setState(() {
+            remainingSeconds--;
+          });
+
           handleTwoRoundsThreeMinuteAnnouncements();
         }
       }
@@ -544,16 +569,11 @@ class _TimerScreenState extends State<TimerScreen> {
       remainingSeconds = shotSeconds;
     });
 
-    // 15秒射の流れ：
-    // ピーピー → 1回目 → 15秒射開始 → カウントダウン
-    // → ピーピー → 2回目 → 15秒射開始 → カウントダウン …
-    // → 最後はピーピーピー
-
-    // 最初の準備開始
+    // 1回目の準備開始合図
     await playBeeps(2);
     if (!isCurrentRunActive(thisRunId)) return;
 
-    // 1回目
+    // ピピの1秒後に回数を読み上げる
     await Future.delayed(const Duration(seconds: 1));
     if (!isCurrentRunActive(thisRunId)) return;
 
@@ -563,7 +583,7 @@ class _TimerScreenState extends State<TimerScreen> {
     while (currentShotRound <= totalShotRounds) {
       if (!isCurrentRunActive(thisRunId)) return;
 
-      // 回数アナウンス後、約4秒待って15秒射開始のピー
+      // 回数アナウンス後、約4秒待ってピーで射撃開始
       await Future.delayed(const Duration(seconds: 4));
       if (!isCurrentRunActive(thisRunId)) return;
 
@@ -574,7 +594,7 @@ class _TimerScreenState extends State<TimerScreen> {
       await playOneBeep();
       if (!isCurrentRunActive(thisRunId)) return;
 
-      // 15秒から11秒まで
+      // 15秒から11秒までは通常の秒送り
       while (remainingSeconds > 10) {
         if (!await waitOneSecond(thisRunId)) return;
         setState(() {
@@ -582,15 +602,15 @@ class _TimerScreenState extends State<TimerScreen> {
         });
       }
 
-      // 10、9、8……1
+      // 10、9、8……1を表示と音声で同期
       final completed = await runSynchronizedCountdown(
         thisRunId,
         from: remainingSeconds.clamp(1, 10),
       );
       if (!completed) return;
 
-      // 10回目終了
       if (currentShotRound == totalShotRounds) {
+        // 10回目だけ競技終了のピーピーピー
         await Future.delayed(const Duration(seconds: 1));
         if (!isCurrentRunActive(thisRunId)) return;
 
@@ -603,17 +623,17 @@ class _TimerScreenState extends State<TimerScreen> {
         return;
       }
 
-      // 15秒射終了 → ピーピー
-      await playBeeps(2);
-      if (!isCurrentRunActive(thisRunId)) return;
-
-      // 次の回数へ
+      // 次の回数へ進める
       setState(() {
         currentShotRound++;
         remainingSeconds = shotSeconds;
       });
 
-      // ピーピーの1秒後に次の回数
+      // 各回終了直後のピピが、そのまま次の回の準備開始合図
+      await playBeeps(2);
+      if (!isCurrentRunActive(thisRunId)) return;
+
+      // ピピの1秒後に「15秒しゃ2回目」などと読み上げる
       await Future.delayed(const Duration(seconds: 1));
       if (!isCurrentRunActive(thisRunId)) return;
 
