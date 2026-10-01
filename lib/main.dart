@@ -22,7 +22,7 @@ extension TimerModeExtension on TimerMode {
   String get label {
     switch (this) {
       case TimerMode.threeMinutes:
-        return '3分モード';
+        return '2分モード';
       case TimerMode.threeMinutesTwoRoundsAbCd:
         return '3分2立ち・AB→CD';
       case TimerMode.threeMinutesTwoRoundsCdAb:
@@ -69,13 +69,10 @@ class _TimerScreenState extends State<TimerScreen> {
   final TextEditingController customSecondsController =
       TextEditingController(text: '0');
 
-  // スマホWeb向け：
-  // 音声を事前読み込みしたAudioPoolで再生する。
-  final Map<String, AudioPool> soundPools = <String, AudioPool>{};
-  AudioPool? beepPool;
-
-  // 案内・カウントダウンの前の音声を切るために保持。
-  StopFunction? currentVoiceStop;
+  final Map<String, AudioPlayer> soundPlayers = <String, AudioPlayer>{};
+  final List<AudioPlayer> beepPlayers =
+      List<AudioPlayer>.generate(3, (_) => AudioPlayer());
+  int nextBeepPlayerIndex = 0;
 
   bool isRunning = false;
   bool audioReady = false;
@@ -108,6 +105,7 @@ class _TimerScreenState extends State<TimerScreen> {
   int get competitionSeconds {
     switch (selectedMode) {
       case TimerMode.threeMinutes:
+        return 120;
       case TimerMode.threeMinutesTwoRoundsAbCd:
       case TimerMode.threeMinutesTwoRoundsCdAb:
         return 180;
@@ -170,29 +168,19 @@ class _TimerScreenState extends State<TimerScreen> {
 
   Future<void> initializeAudio() async {
     try {
-      // WebではAudioCacheがURLを先に取得してブラウザキャッシュへ入れる。
-      await AudioCache.instance.loadAll(
-        <String>[
-          'sounds/start.wav',
-          ...soundFiles.map((file) => 'sounds/$file'),
-        ],
-      );
-
-      // 笛はピーピー・ピーピーピーを重ねられるよう3台。
-      beepPool = await AudioPool.createFromAsset(
-        path: 'sounds/start.wav',
-        minPlayers: 3,
-        maxPlayers: 3,
-      );
-
-      // 各案内音声も事前読み込み。
-      // maxPlayers=1で同じ音声が暴発しないようにする。
+      // スマホでは1つのAudioPlayerで音源を切り替え続けると、
+      // 2回目以降の音声が再生されないことがあるため、音源ごとに分ける。
       for (final fileName in soundFiles) {
-        soundPools[fileName] = await AudioPool.createFromAsset(
-          path: 'sounds/$fileName',
-          minPlayers: 1,
-          maxPlayers: 1,
-        );
+        final player = AudioPlayer();
+        await player.setReleaseMode(ReleaseMode.stop);
+        await player.setSource(AssetSource('sounds/$fileName'));
+        soundPlayers[fileName] = player;
+      }
+
+      // ピー・ピピ・ピピピは重ねて鳴らせるよう3台を用意する。
+      for (final player in beepPlayers) {
+        await player.setReleaseMode(ReleaseMode.stop);
+        await player.setSource(AssetSource('sounds/start.wav'));
       }
 
       if (!mounted) return;
@@ -201,7 +189,6 @@ class _TimerScreenState extends State<TimerScreen> {
       });
     } catch (error) {
       debugPrint('音声初期化エラー: $error');
-
       if (!mounted) return;
       setState(() {
         audioReady = true;
@@ -214,52 +201,52 @@ class _TimerScreenState extends State<TimerScreen> {
     Duration? waitAfterStart,
   }) async {
     try {
-      // 前の案内・数字の余韻を切る。
-      final previousStop = currentVoiceStop;
-      currentVoiceStop = null;
+      final player = soundPlayers[fileName] ?? AudioPlayer();
 
-      if (previousStop != null) {
-        try {
-          await previousStop();
-        } catch (_) {}
+      if (!soundPlayers.containsKey(fileName)) {
+        await player.setReleaseMode(ReleaseMode.stop);
+        await player.setSource(AssetSource('sounds/$fileName'));
+        soundPlayers[fileName] = player;
       }
 
-      final pool = soundPools[fileName];
-
-      if (pool == null) {
-        debugPrint('AudioPoolがありません: $fileName');
-        return;
-      }
-
-      // 事前読み込み済みの音声を即再生。
-      currentVoiceStop = await pool.start();
+      await player.stop();
+      await player.seek(Duration.zero);
+      await player.resume();
 
       if (waitAfterStart != null) {
         await Future.delayed(waitAfterStart);
       }
     } catch (error) {
       debugPrint('音声再生エラー ($fileName): $error');
+
+      // resumeが失敗した端末向けの予備処理
+      try {
+        final player = soundPlayers[fileName] ?? AudioPlayer();
+        soundPlayers[fileName] = player;
+        await player.play(AssetSource('sounds/$fileName'));
+        if (waitAfterStart != null) {
+          await Future.delayed(waitAfterStart);
+        }
+      } catch (fallbackError) {
+        debugPrint('音声再試行エラー ($fileName): $fallbackError');
+      }
     }
   }
 
   Future<void> playOneBeep() async {
-    final pool = beepPool;
-
-    if (pool == null) {
-      debugPrint('beepPoolが未初期化です');
-      return;
-    }
-
     try {
-      // スマホWebでstart()の完了を待たない。
-      // 再生要求だけをブラウザへ渡し、タイマーをブロックしない。
-      unawaited(
-        pool.start().catchError((error) {
-          debugPrint('ビープ音エラー: $error');
-        }),
-      );
+      final player = beepPlayers[nextBeepPlayerIndex];
+      nextBeepPlayerIndex =
+          (nextBeepPlayerIndex + 1) % beepPlayers.length;
+
+      await player.stop();
+      await player.seek(Duration.zero);
+      await player.resume();
+
+      // start.wavを最後まで鳴らすため、次の処理まで少し待つ。
+      await Future.delayed(const Duration(milliseconds: 300));
     } catch (error) {
-      debugPrint('ビープ音開始エラー: $error');
+      debugPrint('ビープ音エラー: $error');
     }
   }
 
@@ -268,10 +255,9 @@ class _TimerScreenState extends State<TimerScreen> {
       await playOneBeep();
 
       if (i < count - 1) {
-        // ピーの開始間隔。AudioPoolなので前の音を消さない。
-        await Future.delayed(
-          const Duration(milliseconds: 120),
-        );
+        // ビープの開始間隔を一定にする。
+        // playOneBeep内の180ms＋ここ420ms＝約600ms間隔。
+        await Future.delayed(const Duration(milliseconds: 420));
       }
     }
   }
@@ -366,30 +352,11 @@ class _TimerScreenState extends State<TimerScreen> {
     while (remainingSeconds > 10) {
       if (!await waitOneSecond(thisRunId)) return;
 
-      // 準備時間の最後。
-      // スマホWebではAudioPool.start()をawaitすると、
-      // 音声側の処理待ちでタイマー自体が止まることがある。
-      // そこで競技開始ピーを再生開始させてから、タイマーを進める。
-      if (remainingSeconds == competitionSeconds + 1) {
-        unawaited(playOneBeep());
+      setState(() {
+        remainingSeconds--;
+      });
 
-        // ブラウザに再生開始を渡すためのごく短い待ち時間。
-        await Future.delayed(
-          const Duration(milliseconds: 80),
-        );
-
-        if (!isCurrentRunActive(thisRunId)) return;
-
-        setState(() {
-          remainingSeconds--;
-        });
-      } else {
-        setState(() {
-          remainingSeconds--;
-        });
-
-        handleNormalModeAnnouncements();
-      }
+      handleNormalModeAnnouncements();
     }
 
     if (!isCurrentRunActive(thisRunId)) return;
@@ -413,6 +380,11 @@ class _TimerScreenState extends State<TimerScreen> {
   }
 
   void handleNormalModeAnnouncements() {
+    if (remainingSeconds == competitionSeconds) {
+      unawaited(playOneBeep());
+      return;
+    }
+
     switch (selectedMode) {
       case TimerMode.threeMinutes:
         handleThreeMinuteAnnouncements();
@@ -431,12 +403,8 @@ class _TimerScreenState extends State<TimerScreen> {
   }
 
   void handleThreeMinuteAnnouncements() {
-    if (remainingSeconds == 120) {
+    if (remainingSeconds == 60) {
       unawaited(playSound('1min.wav'));
-    } else if (remainingSeconds == 90) {
-      unawaited(playSound('1min30.wav'));
-    } else if (remainingSeconds == 60) {
-      unawaited(playSound('2min.wav'));
     } else if (remainingSeconds == 30) {
       unawaited(playSound('30sec.wav'));
     } else if (remainingSeconds == 15) {
@@ -491,28 +459,11 @@ class _TimerScreenState extends State<TimerScreen> {
       while (remainingSeconds > 1) {
         if (!await waitOneSecond(thisRunId)) return;
 
-        // 3:00の競技開始。
-        // 音声のFutureを待たず、再生開始をスケジュールしてから
-        // タイマーを3:00へ進める。
-        if (remainingSeconds == 181) {
-          unawaited(playOneBeep());
+        setState(() {
+          remainingSeconds--;
+        });
 
-          await Future.delayed(
-            const Duration(milliseconds: 80),
-          );
-
-          if (!isCurrentRunActive(thisRunId)) return;
-
-          setState(() {
-            remainingSeconds--;
-          });
-        } else {
-          setState(() {
-            remainingSeconds--;
-          });
-
-          handleTwoRoundsThreeMinuteAnnouncements();
-        }
+        handleTwoRoundsThreeMinuteAnnouncements();
       }
 
       if (!isCurrentRunActive(thisRunId)) return;
@@ -550,7 +501,9 @@ class _TimerScreenState extends State<TimerScreen> {
   }
 
   void handleTwoRoundsThreeMinuteAnnouncements() {
-    if (remainingSeconds == 120) {
+    if (remainingSeconds == 180) {
+      unawaited(playOneBeep());
+    } else if (remainingSeconds == 120) {
       unawaited(playSound('1min.wav'));
     } else if (remainingSeconds == 90) {
       unawaited(playSound('1min30.wav'));
@@ -645,12 +598,6 @@ class _TimerScreenState extends State<TimerScreen> {
   void stopTimer() {
     runId++;
 
-    final stop = currentVoiceStop;
-    currentVoiceStop = null;
-    if (stop != null) {
-      unawaited(stop());
-    }
-
     setState(() {
       isRunning = false;
     });
@@ -658,12 +605,6 @@ class _TimerScreenState extends State<TimerScreen> {
 
   void resetTimer() {
     runId++;
-
-    final stop = currentVoiceStop;
-    currentVoiceStop = null;
-    if (stop != null) {
-      unawaited(stop());
-    }
 
     setState(() {
       isRunning = false;
@@ -743,19 +684,11 @@ class _TimerScreenState extends State<TimerScreen> {
   @override
   void dispose() {
     runId++;
-    final stop = currentVoiceStop;
-    currentVoiceStop = null;
-    if (stop != null) {
-      unawaited(stop());
+    for (final player in soundPlayers.values) {
+      unawaited(player.dispose());
     }
-
-    for (final pool in soundPools.values) {
-      unawaited(pool.dispose());
-    }
-
-    final beep = beepPool;
-    if (beep != null) {
-      unawaited(beep.dispose());
+    for (final player in beepPlayers) {
+      unawaited(player.dispose());
     }
     customMinutesController.dispose();
     customSecondsController.dispose();
@@ -796,7 +729,7 @@ class _TimerScreenState extends State<TimerScreen> {
                         filled: true,
                         fillColor: Colors.white,
                       ),
-                      items: TimerMode.values.map((mode) {
+                      items: TimerMode.values.where((mode) => mode == TimerMode.threeMinutes).map((mode) {
                         return DropdownMenuItem<TimerMode>(
                           value: mode,
                           child: Text(mode.label),
