@@ -266,24 +266,19 @@ class _TimerScreenState extends State<TimerScreen> {
     int thisRunId, {
     int from = 10,
   }) async {
+    // 音声の再生完了を待つと、スマホで再生が停止/保留された際に
+    // タイマー自体も止まるため、音声と秒送りを独立させる。
     for (int number = from; number >= 1; number--) {
       if (!isCurrentRunActive(thisRunId)) return false;
 
-      if (mounted && remainingSeconds != number) {
+      if (mounted) {
         setState(() {
           remainingSeconds = number;
         });
       }
 
-      final stopwatch = Stopwatch()..start();
-
-      await playSound('$number.wav');
-
-      final waitTime = const Duration(seconds: 1) - stopwatch.elapsed;
-      if (waitTime > Duration.zero) {
-        await Future.delayed(waitTime);
-      }
-
+      unawaited(playSound('$number.wav'));
+      await Future.delayed(const Duration(seconds: 1));
       if (!isCurrentRunActive(thisRunId)) return false;
     }
 
@@ -292,7 +287,6 @@ class _TimerScreenState extends State<TimerScreen> {
         remainingSeconds = 0;
       });
     }
-
     return true;
   }
 
