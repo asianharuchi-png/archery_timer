@@ -361,7 +361,6 @@ class _TimerScreenState extends State<TimerScreen> {
     );
     if (!completed) return;
 
-    await Future.delayed(const Duration(seconds: 1));
     if (!isCurrentRunActive(thisRunId)) return;
 
     await playBeeps(3);
